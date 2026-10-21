@@ -6,6 +6,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QMainWindow,
                                QPushButton, QVBoxLayout, QWidget)
 from serial.tools import list_ports
+from .beep import HeartBeeper
 
 from . import config
 from .acquisition import AcquisitionController
@@ -25,6 +26,7 @@ class MainWindow(QMainWindow):
         self._filt = RingBuffer(config.BUFFER_SIZE)
         self._filter = ECGFilter()
         self._det = RPeakDetector()
+        self._beeper = HeartBeeper()
         self._acq = None
         self._info = {}
         self._last_lost = 0
@@ -57,7 +59,11 @@ class MainWindow(QMainWindow):
         for chk in (self._chk_hp, self._chk_notch, self._chk_lp):
             chk.setChecked(True)
             chk.toggled.connect(self._on_filter_changed)
-
+            
+        self._chk_sound = QCheckBox("Sonido")
+        self._chk_sound.setChecked(self._beeper.available)
+        self._chk_sound.setEnabled(self._beeper.available)
+        
         self._view = QComboBox()
         self._view.addItems(["Filtrado", "Crudo", "Ambos"])
         self._view.currentIndexChanged.connect(self._apply_view)
@@ -78,6 +84,8 @@ class MainWindow(QMainWindow):
         row_filters = QHBoxLayout()
         for w in (self._chk_hp, self._chk_notch, self._chk_lp):
             row_filters.addWidget(w)
+            
+        row_filters.addWidget(self._chk_sound)
         row_filters.addStretch(1)
         row_filters.addWidget(QLabel("Vista:"))
         row_filters.addWidget(self._view)
@@ -159,6 +167,7 @@ class MainWindow(QMainWindow):
             self._acq.error.connect(self._on_error)
             self._acq.start()
         else:
+            self._beeper.stop()
             if self._acq is not None:
                 self._acq.shutdown()
                 self._acq = None
@@ -182,10 +191,21 @@ class MainWindow(QMainWindow):
         self._last_lost = lost
 
     def _on_block(self, block: np.ndarray):
-        self._det.process(block)
+        nuevos = self._det.process(block)
+        if nuevos:
+            print(f"R | bpm={self._det.bpm} | sonido={self._chk_sound.isChecked()} "
+                  f"| permitido={self._beep_permitido()}", flush=True)
+        if nuevos and self._chk_sound.isChecked() and self._beep_permitido():
+            self._beeper.play()
         self._filt.append(self._filter.process(block))
         self._raw.append(block)
         self._rate_n += len(block)
+
+    def _beep_permitido(self) -> bool:
+        # Solo con frecuencia válida (calidad suficiente) y electrodos conectados.
+        if self._det.bpm is None:
+            return False
+        return not (self._info.get("lo_plus") or self._info.get("lo_minus"))
 
     @staticmethod
     def _draw(curve, data: np.ndarray):
@@ -253,6 +273,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._timer.stop()
+        self._beeper.stop()
         if self._acq is not None:
             self._acq.shutdown()
             self._acq = None
